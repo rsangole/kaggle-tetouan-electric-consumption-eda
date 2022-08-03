@@ -1,0 +1,325 @@
+---
+title: "Tetouan Electric Consumption - EDA"
+author: "R Sangole"
+date: "Aug 2, 2022"
+output: 
+  html_document: 
+    toc: yes
+    highlight: kate
+    theme: paper
+    code_folding: hide
+    fig_width: 12
+    fig_height: 4.5
+    number_sections: yes
+---
+
+```{r setup, include=FALSE, echo=FALSE}
+knitr::opts_chunk$set(echo=TRUE, error=FALSE)
+knitr::opts_chunk$set(out.width="100%", fig.height = 6, split=FALSE, fig.align = 'default')
+options(dplyr.summarise.inform = FALSE)
+```
+
+![](https://storage.googleapis.com/kaggle-datasets-images/2380926/4017301/f43904962439a588d97e0069768f54a2/dataset-cover.jpg?t=2022-08-01-21-28-32) 
+
+# Introduction
+
+Welcome to an EDA of the McDonald's India Menu - Nutrition dataset, uploaded by [Deep Contractor](https://www.kaggle.com/datasets/deepcontractor/mcdonalds-india-menu-nutrition-facts).
+
+You don't have to be a health expert to know fast food isn't good for you. But, how bad is it truly? Can we find patterns in the design of their menu? Let's explore.
+
+# Initial Setup {.tabset}
+
+_Read through the initial setup in the 4 tabs below._
+
+## Libraries {.tabset}
+
+First, some I import some useful libraries and set some plotting defaults.
+
+```{r libraries, message=FALSE, warning=FALSE}
+# Data Manipulation
+library(dplyr)
+library(tidyr)
+library(readr)
+library(skimr)
+library(purrr)
+library(stringr)
+library(urltools)
+library(magrittr)
+library(lubridate)
+
+# Plots
+library(ggplot2)
+library(naniar)
+library(packcircles)
+library(ggridges)
+library(ggbeeswarm)
+library(patchwork)
+
+# PCA
+if(!require(FactoMineR))
+  remotes::install_cran("FactoMineR")
+if(!require(factoextra))
+  remotes::install_cran("factoextra")
+library(FactoMineR)
+library(factoextra)
+
+# Tables
+library(reactable)
+
+# Settings
+theme_set(theme_minimal(
+  base_size = 13,
+  base_family = "Menlo"))
+theme_update(
+  plot.title.position = "plot"
+)
+```
+
+## Read In {.tabset}
+
+Let's start be reading in the data. There is only one CSV file, with the menu items and some measurements on each item. `{janitor::clean_names}` helps us get clean column names quickly.
+
+```{r message=FALSE, warning=FALSE}
+dat <- read_csv("../input/electric-power-consumption/powerconsumption.csv") %>% 
+  janitor::clean_names()
+glimpse(dat, 100)
+```
+
+## Quick View {.tabset}
+
+I love to take the first peek into a dataset with the amazing [`{skimr}`](https://docs.ropensci.org/skimr/index.html) package. Few takeaways:
+
+- `per_serve_size` doesn't sound like it should be of type character
+- no missing values except for `sodium_mg`
+
+```{r paged.print=FALSE}
+skimr::skim(dat)
+```
+
+# Interesting Questions
+
+Since this is an open ended exploration, I will posit some questions which will guide the flow of further work.
+
+1. How does the power consumption vary by each zone?
+1. Are there temporal patterns in the power consumption?
+1. What's the relationship with temperature, humidity, etc?
+1. What does a multivariate study of the dataset show?
+1. Are there customer usage patterns found in the time series? 
+
+# Feature Development {.tabset}
+
+To aid answering many of these, I first need to create a few new features in the data set. 
+
+_We go from 13 columns to 15 columns in the data set._
+
+## Serving Size {.tabset}
+
+The serving size by default is a character, with the units (g) embedded in the column. Let's clean this up, and rename the column to our convention `{measurement}_{unit}`.
+
+```{r}
+dat <- dat %>% 
+  mutate(datetime = lubridate::as_datetime(datetime, format = "%m/%d/%Y %H:%M"),
+         dt_hr = lubridate::round_date(datetime, "hour")) %>%
+  timetk::tk_augment_timeseries_signature(datetime) %>%
+  # glimpse()
+  select(
+    - matches("(xts)|(second)|(minute)|(iso)|(num)|(diff)|(hour12)|(am.pm)|(week\\d)|(mday7)")
+  ) %>% 
+  mutate(hour = factor(hour, ordered = TRUE)) %>% 
+  rename_with(~str_replace(.x, "power_consumption_", ""), contains("zone"))
+dat %>% glimpse(80)
+```
+
+```{r}
+dat <- dat %>% 
+  timetk::tk_augment_fourier(datetime, .periods = 2, .K = 2)
+dat %>% glimpse(80)
+```
+
+
+# Graphical EDA
+
+Now that I have the data sets prepared and ready, it's time for the fun part - being creative and creating some interesting visuals!
+
+There are four components to the EDA below:
+
+1. Unhealthiest menu exploration
+1. Energy fense foods exploration
+1. Gourmet vs Regular menu exploration
+1. Principal Component Analysis for multivariate exploration
+
+
+## Unhealthiest Menu Options {.tabset}
+
+```{r}
+dat %>% 
+  select(datetime, contains("zone")) %>% 
+  tidyr::pivot_longer(-datetime) %>% 
+  ggplot(aes(datetime, value)) +
+  geom_line(aes(color = name))
+```
+
+```{r}
+dat %>% 
+  select(wday.lbl, contains("zone")) %>% 
+  tidyr::pivot_longer(-wday.lbl) %>% 
+  ggplot(aes(wday.lbl, value)) +
+  geom_boxplot(aes(color = name))
+```
+
+```{r}
+dat %>% 
+  select(hour, contains("zone")) %>% 
+  tidyr::pivot_longer(-hour) %>% 
+  ggplot(aes(hour, value)) +
+  geom_boxplot(aes(color = name))
+```
+
+```{r}
+dat %>% 
+  select(month.lbl, contains("zone")) %>% 
+  tidyr::pivot_longer(-month.lbl) %>% 
+  ggplot(aes(month.lbl, value)) +
+  geom_boxplot(aes(color = name))
+```
+
+
+```{r}
+dat %>% 
+  select(datetime, contains("zone")) %>% 
+  tidyr::pivot_longer(-datetime) %>% 
+  group_by(name) %>% 
+  timetk::plot_time_series_boxplot(datetime, value, "1 month")
+dat %>% 
+  select(datetime, month.lbl, contains("zone")) %>% 
+  tidyr::pivot_longer(-datetime:-month.lbl) %>% 
+  group_by(name) %>% 
+  timetk::plot_time_series_boxplot(datetime, value, "1 week")
+```
+
+```{r}
+dat %>% 
+  timetk::plot_time_series_regression(
+    datetime,
+    zone1 ~ month.lbl + temperature + humidity + wind_speed + as.factor(day) + hour + week,
+    .show_summary = TRUE
+  )
+```
+
+
+```{r}
+dat %>% 
+  timetk::plot_seasonal_diagnostics(datetime, zone1)
+```
+
+```{r}
+dat %>% 
+  timetk::plot_stl_diagnostics(datetime, zone1)
+```
+
+
+## Principal Component Analysis {.tabset}
+
+One of my favorite methods of looking at multivariate numerical data is the simple, yet powerful tool - PCA. It's a great way to extract layers upon layers of information about the dataset from just a few plots. Let's explore this dataset using PCA.
+
+At a high-level, here is the workflow:
+
+1. Calculate the principal components
+1. Explore the variables on a correlation circle
+1. Explore the individual observations on a biplot
+
+We can throw in some clustering and data manipulation to get a pretty rich understanding of these data.
+
+###  Calc Components {.tabset}
+
+Here, I'm calculating the principal components on a scaled data set of the numeric features. I'm imputing the missing values of sodium to the median value. `prcomp()` is a popular method, but I like the `FactoMineR::PCA()` method which offers some great features for post processing.
+
+```{r message=FALSE, warning=FALSE}
+dat %>% 
+  select(where(is.numeric)) %>%
+  # Impute the missing sodium_mg values to the median
+  mutate(sodium_mg = ifelse(is.na(sodium_mg), median(sodium_mg, na.rm = TRUE), sodium_mg)) %>% 
+  scale() %>% 
+  as.data.frame() -> dat_scaled
+rownames(dat_scaled) <- dat$menu_items
+pca <- PCA(dat_scaled, graph = FALSE)
+pca
+```
+
+We can see that the 1st two PCs account for ~70% of variation in the numerical data. Not too shabby!
+
+```{r}
+fviz_eig(pca, addlabels = TRUE, ylim = c(0, 50))
+```
+
+### Explore Variables {.tabset}
+
+The 'variable correlation plot' or 'correlation circle plot' is an insightful plot. It shows the relationships between all the features. Summarizing from this  [article](http://www.sthda.com/english/articles/31-principal-component-methods-in-r-practical-guide/112-pca-principal-component-analysis-essentials/#visualization-and-interpretation):
+
+- Positively correlated variables are grouped together.
+- Negatively correlated variables are positioned on opposite sides of the origin.
+- Distance between variables and the origin measures the quality of the variables, variables that are away from the origin are well represented.
+
+What are the takeaways?
+
+1. We can see 6 distinct clusters of features, which I've highlighted in the plot after running kmeans on the coordinates of the two principal component loadings of the features.
+    - Sugars and serving size are highly correlated
+    - Carb is on it's own
+    - Calories and Saturated Fat are correlated
+    - As are the Total Fat, Sodium and Proteins
+    - Cholesterol and energy density are correlated
+1. Almost all the features (except trans fat, and perhaps cholesterol) are heavily loaded in the 1st two PCs (i.e., they are close to the correlation circle), which means they're all actively participating in these components.
+1. Proteins, total fat, and sodium are slightly negatively correlated with features like total sugars and added sugars.
+
+```{r}
+clusts <- kmeans(pca$var$coord[,1:2], 6, nstart = 50)
+
+fviz_pca_var(
+  pca,
+  repel = TRUE,
+  col.var = as.factor(clusts$cluster),
+  legend.title = "Cluster"
+)
+```
+
+### Explore Individuals {.tabset}
+
+Now that we've looked at the features, let's look at the individual data points on the 1st two PCs.
+
+First, we plot just the points across PC1 and PC2. Immediately, we can see distinct clusters for each of the Menu types. On the left, the drinks form an unusually straight line parallel to PC2 - notice how the smalls are towards the x-axis, and large drinks on top. McCafe menu items take the center-half of the plot. Condiments occupy the 3rd quadrant, while the regular and gourmet menu are spread across and 1st and 4th quadrant.
+
+```{r message=FALSE, warning=FALSE}
+fviz_pca_ind(pca,
+             col.ind = dat$menu_category,
+             select.ind = list(cos2 = 0.5))
+```
+Now, if we superimpose the feature loadings on top of the plot above, we can extract quite a few insights.
+
+- beverages certainly follow the sugars vectors from small to large
+- 'Chicken Cheese Lava Burger' and 'Veg Maharaja Mac' have the highest calorie counts
+- The chicken burgers have the highest protein content, as expected
+- The McCafe menus have moderate sugars but also moderate carbs 
+
+_Remember, the axes center (0,0) indicate the region of average values for the principal component loadings. i.e., individual data points close to the axis will tend to have values close to the average of the dataset._ 
+
+```{r message=FALSE, warning=FALSE}
+fviz_pca_biplot(
+  pca,
+  col.ind = dat$menu_category,
+  geom.ind = "text"
+)
+```
+
+We can roughly call Principal Component 1 (Dim1) as the 'fats, proteins and calories' axis, while Principal Component 2 (Dim2) is the 'sugars and carbs' axis. Another way to look at the two dims is using a factor contribution plot, like the one below.
+
+```{r}
+p1 <- fviz_contrib(pca, choice = "var", axes = 1, top = 10)
+p2 <- fviz_contrib(pca, choice = "var", axes = 2, top = 10)
+p1/p2
+```
+
+---
+
+That was a fun exploration of these data. What else can you think of to explore?
+
+Cheers!
