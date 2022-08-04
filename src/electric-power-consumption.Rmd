@@ -1,7 +1,7 @@
 ---
-title: "Tetouan Electric Consumption - EDA"
+title: "Tetouan Electric Consumption - EDA & Predictive Modeling in R"
 author: "R Sangole"
-date: "Aug 2, 2022"
+date: "Aug 4, 2022"
 output: 
   html_document: 
     toc: yes
@@ -201,7 +201,13 @@ dat %>%
 dat %>% 
   timetk::plot_time_series_regression(
     datetime,
-    zone1 ~ month.lbl + temperature + humidity + wind_speed + as.factor(day) + hour + week,
+    zone1 ~ month.lbl + temperature + humidity + wind_speed + as.factor(day) + hour + week + lag(zone1),
+    .show_summary = TRUE
+  )
+dat %>% 
+  timetk::plot_time_series_regression(
+    datetime,
+    zone2 ~ month.lbl + temperature + humidity + wind_speed + as.factor(day) + hour + week + lag(zone2),
     .show_summary = TRUE
   )
 ```
@@ -212,11 +218,12 @@ dat %>%
   timetk::plot_seasonal_diagnostics(datetime, zone1)
 ```
 
-```{r}
-dat %>% 
-  timetk::plot_stl_diagnostics(datetime, zone1)
-```
-
+# ```{r}
+# dat %>% 
+#   group_by(date = as.Date(dt_hr)) %>% 
+#   summarise(mean_zone1 = mean(zone1)) %>% 
+#   timetk::plot_stl_diagnostics(date, mean_zone1)
+# ```
 
 ## Principal Component Analysis {.tabset}
 
@@ -236,12 +243,10 @@ Here, I'm calculating the principal components on a scaled data set of the numer
 
 ```{r message=FALSE, warning=FALSE}
 dat %>% 
-  select(where(is.numeric)) %>%
-  # Impute the missing sodium_mg values to the median
-  mutate(sodium_mg = ifelse(is.na(sodium_mg), median(sodium_mg, na.rm = TRUE), sodium_mg)) %>% 
+  select(temperature:wind_speed, month, day, hour, wday) %>%
+  mutate(hour = as.numeric(hour)) %>% 
   scale() %>% 
   as.data.frame() -> dat_scaled
-rownames(dat_scaled) <- dat$menu_items
 pca <- PCA(dat_scaled, graph = FALSE)
 pca
 ```
@@ -272,7 +277,7 @@ What are the takeaways?
 1. Proteins, total fat, and sodium are slightly negatively correlated with features like total sugars and added sugars.
 
 ```{r}
-clusts <- kmeans(pca$var$coord[,1:2], 6, nstart = 50)
+clusts <- kmeans(pca$var$coord[,1:2], 5, nstart = 50)
 
 fviz_pca_var(
   pca,
@@ -290,8 +295,10 @@ First, we plot just the points across PC1 and PC2. Immediately, we can see disti
 
 ```{r message=FALSE, warning=FALSE}
 fviz_pca_ind(pca,
-             col.ind = dat$menu_category,
-             select.ind = list(cos2 = 0.5))
+             # col.ind = dat$,
+             geom = "point",
+             alpha = 0.2,
+             select.ind = list(cos2 = 0.6))
 ```
 Now, if we superimpose the feature loadings on top of the plot above, we can extract quite a few insights.
 
@@ -303,11 +310,29 @@ Now, if we superimpose the feature loadings on top of the plot above, we can ext
 _Remember, the axes center (0,0) indicate the region of average values for the principal component loadings. i.e., individual data points close to the axis will tend to have values close to the average of the dataset._ 
 
 ```{r message=FALSE, warning=FALSE}
-fviz_pca_biplot(
-  pca,
-  col.ind = dat$menu_category,
-  geom.ind = "text"
-)
+biplots <- function(pca,
+                    color_by,
+                    legend_title,
+                    alpha = 0.2,
+                    cos2_min = 0.6) {
+  fviz_pca_biplot(
+    pca,
+    geom.ind = "point",
+    col.ind = color_by,
+    alpha.var = "cos2",
+    # alpha = 0.2,
+    select.ind = list(cos2 = cos2_min)
+  ) +
+    coord_equal() +
+    labs(color = legend_title,
+         shape = legend_title,
+         alpha = "Feature Quality")
+}
+biplots(pca, dat$month.lbl, "Month") -> p4
+biplots(pca, cut(dat$zone1, 5), "Zone 1") -> p1
+biplots(pca, cut(dat$zone2, 5), "Zone 2") -> p2
+biplots(pca, cut(dat$zone3, 5),"Zone 3") -> p3
+(p1|p2)/(p3|p4)
 ```
 
 We can roughly call Principal Component 1 (Dim1) as the 'fats, proteins and calories' axis, while Principal Component 2 (Dim2) is the 'sugars and carbs' axis. Another way to look at the two dims is using a factor contribution plot, like the one below.
