@@ -1,0 +1,328 @@
+---
+title: "Tétouan Electric Consumption - EDA & Predictive Modeling in R - Part 1"
+author: "R Sangole"
+date: "Aug 4, 2022"
+output: 
+  html_document: 
+    toc: yes
+    highlight: kate
+    theme: paper
+    code_folding: hide
+    fig_width: 12
+    fig_height: 4.5
+    number_sections: yes
+---
+
+```{r setup, include=FALSE, echo=FALSE}
+knitr::opts_chunk$set(echo=TRUE, error=FALSE)
+knitr::opts_chunk$set(out.width="100%", fig.height = 6, split=FALSE, fig.align = 'default')
+options(dplyr.summarise.inform = FALSE)
+```
+
+![](https://storage.googleapis.com/kaggle-datasets-images/2380926/4017301/f43904962439a588d97e0069768f54a2/dataset-cover.jpg?t=2022-08-01-21-28-32){width="654"}
+
+# Introduction
+
+Welcome to the EDA and time-series modeling of the the [Tétouan Electrical Consumption data](https://www.kaggle.com/datasets/fedesoriano/electric-power-consumption), uploaded by [fedesoriano](https://www.kaggle.com/fedesoriano).
+
+This is Part 1 of a two part series exploring this data set. 
+
+In this notebook, you'll see,
+
+-   Traditional time-series exploratory visuals, to get an understanding of the dataset
+-   Time Series Linear Modeling to create a predictive linear model for power consumption
+
+In Part 2, you'll see multivariate approaches towards understanding the time-series, as well as extraction of time series patterns.
+
+Tétouan is a city in northern Morocco with a population of \~0.5 million. Look at these gorgeous photos from [Wikipedia](https://en.wikipedia.org/wiki/Tétouan).
+
+|                                                                                                                                      |                                                                                                                 |
+|:--------------------------:|:-----------------------------:|
+| ![](https://upload.wikimedia.org/wikipedia/commons/a/a0/A_view_of_Bouanane%252C_a_popular_destination_in_Tetouan._.jpg){width="355"} | ![](https://upload.wikimedia.org/wikipedia/commons/f/f7/A_view_of_mount_ghorghiz_in_Tetouan._.jpg){width="394"} |
+
+# Initial Setup {.tabset}
+
+*Read through the initial setup in the 4 tabs below.*
+
+## Libraries {.tabset}
+
+First, some I import some useful libraries and set some plotting defaults. I have to install two packages here, which are currently not in the Kaggle-R docker container.
+
+```{r libraries, message=FALSE, warning=FALSE}
+# Data Manipulation
+library(dplyr)
+library(tidyr)
+library(readr)
+library(skimr)
+library(purrr)
+library(stringr)
+library(urltools)
+library(magrittr)
+library(lubridate)
+
+# Plots
+library(ggplot2)
+library(naniar)
+library(packcircles)
+library(ggridges)
+library(ggbeeswarm)
+library(patchwork)
+
+# PCA
+if(!require(FactoMineR))
+  remotes::install_cran("FactoMineR")
+if(!require(factoextra))
+  remotes::install_cran("factoextra")
+library(FactoMineR)
+library(factoextra)
+
+# Tables
+library(reactable)
+
+# Settings
+theme_set(theme_minimal(
+  base_size = 13,
+  base_family = "Menlo"))
+theme_update(
+  plot.title.position = "plot"
+)
+```
+
+## Read In {.tabset}
+
+Let's start be reading in the data. There is only one CSV file. `{janitor::clean_names}` helps us get clean column names quickly. Here's a peek into the dataset.
+
+```{r message=FALSE, warning=FALSE}
+dat <- read_csv("../input/electric-power-consumption/powerconsumption.csv") %>% 
+  janitor::clean_names()
+glimpse(dat, 100)
+```
+
+## Quick View {.tabset}
+
+[`{skimr}`](https://docs.ropensci.org/skimr/index.html) gives a detailed dive into the dataset. Few takeaways:
+
+- `datetime` is imported as character, and needs to be handled
+- no missing data at all (thank you, fedesoriano)
+- zone 1, 2 and 3 are in the order of their mean and p90 power consumption ranges
+- finally, I'll be honest - I have no idea what `general diffuse flows` or `diffuse flows` mean, despite the definition in the data page
+
+```{r paged.print=FALSE}
+skimr::skim(dat)
+```
+
+# Interesting Questions
+
+Since this is an open ended exploration, I will posit some questions which will guide the flow of further work.
+
+1.  How does the power consumption vary by each zone?
+1.  Are there temporal patterns in the power consumption?
+1.  Can a linear predictive model be built using simple features?
+1.  What's the relationship with temperature, humidity, etc?
+1.  What does a multivariate study of the data set show? _... in part 2_
+1.  Are there customer usage patterns found in the time series? _... in part 2_
+
+# Feature Development
+
+To aid answering many of these, I first need to create a few new features in the data set.
+
+*We go from 9 columns to 24 columns in the data set.*
+
+## Date-Time Features
+
+Date-time features are excellent ways to add more depth to the time dimension of the dataset. The `timetk::tk_augment_timeseries_signature` is one of the best tools to do so. The function creates a bunch of columns I don't want for this analysis, so I exclude them. Finally, I'm renaming the power for brevity's sake.
+
+```{r}
+dat <- dat %>% 
+  mutate(datetime = lubridate::as_datetime(datetime, format = "%m/%d/%Y %H:%M"),
+         dt_hr = lubridate::round_date(datetime, "hour")) %>%
+  timetk::tk_augment_timeseries_signature(datetime) %>%
+  select(
+    - matches("(xts)|(second)|(minute)|(iso)|(num)|(diff$)|(hour12)|(am.pm)|(week\\d)|(mday7)")
+  ) %>% 
+  mutate(hour = factor(hour, ordered = TRUE)) %>% 
+  rename_with(~str_replace(.x, "power_consumption_", ""), contains("zone"))
+
+dat %>% glimpse(80)
+```
+
+# Graphical EDA
+
+There are two components to the EDA below.
+
+1. Time Series Plots
+1. Seasonality Plots
+
+## TS Plot {.tabset}
+
+
+
+```{r}
+dat %>% 
+  select(datetime, contains("zone")) %>% 
+  tidyr::pivot_longer(-datetime) %>% 
+  ggplot(aes(datetime, value)) +
+  geom_vline(xintercept = as.POSIXct("2017-06-26"), color = "black", lty = 2) +
+  geom_line(aes(color = name)) +
+  scale_y_continuous(labels = scales::label_number_si()) +
+  labs(
+    x = NULL,
+    y = "Power",
+    title = "Year of 2017",
+    color = "Zone"
+  ) -> p1
+
+dat %>% 
+  ggplot(aes(datetime, temperature)) +
+  geom_line() +
+  labs(
+    x = NULL,
+    y = "Temperature"
+  ) -> p2
+
+dat %>% 
+  ggplot(aes(datetime, humidity)) +
+  geom_line() +
+  labs(
+    x = NULL,
+    y = "Humidity"
+  ) -> p3
+
+dat %>% 
+  ggplot(aes(datetime, wind_speed)) +
+  geom_line() +
+  labs(
+    x = NULL,
+    y = "Wind Speed"
+  ) -> p4
+
+dat %>% 
+  select(datetime, contains("flows")) %>% 
+  tidyr::pivot_longer(-datetime) %>% 
+  ggplot(aes(datetime, value)) +
+  geom_line(aes(color = name)) +
+  labs(
+    x = NULL,
+    y = "Flows",
+    color = "Flows"
+  ) -> p5
+
+dat %>% 
+  filter(datetime > "2017-06-16", datetime < "2017-07-06") %>% 
+  select(datetime, contains("zone")) %>% 
+  tidyr::pivot_longer(-datetime) %>% 
+  ggplot(aes(datetime, value)) +
+  geom_vline(xintercept = as.POSIXct("2017-06-26"), color = "black", lty = 2) +
+  geom_line(aes(color = name)) +
+  scale_y_continuous(labels = scales::label_number_si()) +
+  labs(
+    x = NULL,
+    y = "Power",
+    title = "Zoomed: 15 Dec to 31 Dec 2017",
+    color = "Zone"
+  )-> p6
+p1 / p2 / p3 / p4 / p5 / p6
+```
+
+
+
+```{r}
+split_date <- as.Date("2017-06-27")
+n_days <- 7
+dat %>%
+  filter(datetime > split_date - n_days, datetime < split_date + n_days) %>%
+  mutate(split = ifelse(
+    datetime > split_date,
+    sprintf("After %s", format(split_date, "%b-%Y")),
+    sprintf("Before %s", format(split_date, "%b-%Y"))
+  )) %>%
+  select(split, contains("zone")) %>%
+  tidyr::pivot_longer(-split) %>%
+  ggplot(aes(x = split, y = value, color = split)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.2, alpha = 0.3) +
+  scale_y_continuous(labels = scales::label_number_si()) +
+  facet_wrap(~name, nrow = 1) +
+  labs(
+    x = NULL,
+    y = "Power",
+    color = NULL
+  ) +
+  theme(legend.position = "top")
+```
+
+## Seasonalities {.tabset}
+
+```{r}
+dat %>% 
+  select(wday.lbl, contains("zone")) %>% 
+  tidyr::pivot_longer(-wday.lbl) %>% 
+  ggplot(aes(wday.lbl, value)) +
+  geom_boxplot(aes(color = name))
+```
+
+```{r}
+dat %>% 
+  select(hour, contains("zone")) %>% 
+  tidyr::pivot_longer(-hour) %>% 
+  ggplot(aes(hour, value)) +
+  geom_boxplot(aes(color = name))
+```
+
+```{r}
+dat %>% 
+  select(month.lbl, contains("zone")) %>% 
+  tidyr::pivot_longer(-month.lbl) %>% 
+  ggplot(aes(month.lbl, value)) +
+  geom_boxplot(aes(color = name))
+```
+
+```{r}
+dat %>% 
+  select(datetime, contains("zone")) %>% 
+  tidyr::pivot_longer(-datetime) %>% 
+  group_by(name) %>% 
+  timetk::plot_time_series_boxplot(datetime, value, "1 month")
+dat %>% 
+  select(datetime, month.lbl, contains("zone")) %>% 
+  tidyr::pivot_longer(-datetime:-month.lbl) %>% 
+  group_by(name) %>% 
+  timetk::plot_time_series_boxplot(datetime, value, "1 week")
+```
+
+# Time Series Linear Modeling (TSLM)
+
+
+
+```{r}
+dat %>% 
+  timetk::plot_time_series_regression(
+    datetime,
+    zone1 ~ month.lbl + temperature + humidity + wind_speed + as.factor(day) + hour + week + lag(zone1) + as.factor(datetime>split_date),
+    .show_summary = TRUE
+  )
+dat %>% 
+  timetk::plot_time_series_regression(
+    datetime,
+    zone2 ~ month.lbl + temperature + humidity + wind_speed + as.factor(day) + hour + week + lag(zone2) + as.factor(datetime>split_date),
+    .show_summary = TRUE
+  )
+
+dat %>% 
+  timetk::plot_time_series_regression(
+    datetime,
+    zone3 ~ month.lbl + temperature + humidity + wind_speed + as.factor(day) + hour + week + lag(zone3) + as.factor(datetime>split_date),
+    .show_summary = TRUE
+  )
+```
+
+```{r}
+dat %>% 
+  timetk::plot_seasonal_diagnostics(datetime, zone1)
+```
+
+---
+
+Poking around such a well behaved and clean time series is always a joy!
+
+Thanks for reading, and look forward for Part 2 shortly!
