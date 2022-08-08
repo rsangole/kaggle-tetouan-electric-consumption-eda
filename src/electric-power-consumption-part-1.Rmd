@@ -1,4 +1,4 @@
----
+e---
 title: "Tétouan Electric Consumption - EDA & Predictive Modeling in R - Part 1"
 author: "R Sangole"
 date: "Aug 4, 2022"
@@ -59,6 +59,7 @@ library(stringr)
 library(urltools)
 library(magrittr)
 library(lubridate)
+library(janitor)
 
 # Plots
 library(ggplot2)
@@ -67,6 +68,9 @@ library(packcircles)
 library(ggridges)
 library(ggbeeswarm)
 library(patchwork)
+
+# Time Series
+library(timetk)
 
 # PCA
 if(!require(FactoMineR))
@@ -94,7 +98,7 @@ Let's start be reading in the data. There is only one CSV file. `{janitor::clean
 
 ```{r message=FALSE, warning=FALSE}
 dat <- read_csv("../input/electric-power-consumption/powerconsumption.csv") %>% 
-  janitor::clean_names()
+  clean_names()
 glimpse(dat, 100)
 ```
 
@@ -108,7 +112,7 @@ glimpse(dat, 100)
 - finally, I'll be honest - I have no idea what `general diffuse flows` or `diffuse flows` mean, despite the definition in the data page
 
 ```{r paged.print=FALSE}
-skimr::skim(dat)
+skim(dat)
 ```
 
 # Interesting Questions
@@ -134,9 +138,9 @@ Date-time features are excellent ways to add more depth to the time dimension of
 
 ```{r}
 dat <- dat %>% 
-  mutate(datetime = lubridate::as_datetime(datetime, format = "%m/%d/%Y %H:%M"),
-         dt_hr = lubridate::round_date(datetime, "hour")) %>%
-  timetk::tk_augment_timeseries_signature(datetime) %>%
+  mutate(datetime = as_datetime(datetime, format = "%m/%d/%Y %H:%M"),
+         dt_hr = round_date(datetime, "hour")) %>%
+  tk_augment_timeseries_signature(datetime) %>%
   select(
     - matches("(xts)|(second)|(minute)|(iso)|(num)|(diff$)|(hour12)|(am.pm)|(week\\d)|(mday7)")
   ) %>% 
@@ -155,12 +159,15 @@ There are two components to the EDA below.
 
 ## TS Plot {.tabset}
 
+A simple time series plot reveals a lot of insight into a time series dataset. Here, I'm plotting the individual series for the year. What do we see here?
 
+1. Lots of rich dynamics (at least visually) in the power series which we can try to extract later
+1. I see a strong change in the behavior of the series at roughly 27th July 2017. I've marked this with the black dotted line. At the bottom, I'm plotting a 
 
 ```{r}
 dat %>% 
   select(datetime, contains("zone")) %>% 
-  tidyr::pivot_longer(-datetime) %>% 
+  pivot_longer(-datetime) %>% 
   ggplot(aes(datetime, value)) +
   geom_vline(xintercept = as.POSIXct("2017-06-26"), color = "black", lty = 2) +
   geom_line(aes(color = name)) +
@@ -198,7 +205,7 @@ dat %>%
 
 dat %>% 
   select(datetime, contains("flows")) %>% 
-  tidyr::pivot_longer(-datetime) %>% 
+  pivot_longer(-datetime) %>% 
   ggplot(aes(datetime, value)) +
   geom_line(aes(color = name)) +
   labs(
@@ -206,11 +213,16 @@ dat %>%
     y = "Flows",
     color = "Flows"
   ) -> p5
+p1 / p2 / p3 / p4 / p5
+```
 
+
+
+```{r}
 dat %>% 
   filter(datetime > "2017-06-16", datetime < "2017-07-06") %>% 
   select(datetime, contains("zone")) %>% 
-  tidyr::pivot_longer(-datetime) %>% 
+  pivot_longer(-datetime) %>% 
   ggplot(aes(datetime, value)) +
   geom_vline(xintercept = as.POSIXct("2017-06-26"), color = "black", lty = 2) +
   geom_line(aes(color = name)) +
@@ -218,15 +230,10 @@ dat %>%
   labs(
     x = NULL,
     y = "Power",
-    title = "Zoomed: 15 Dec to 31 Dec 2017",
+    title = "Power Zoomed: 15 Dec to 31 Dec 2017",
     color = "Zone"
-  )-> p6
-p1 / p2 / p3 / p4 / p5 / p6
-```
+  )-> p1
 
-
-
-```{r}
 split_date <- as.Date("2017-06-27")
 n_days <- 7
 dat %>%
@@ -234,21 +241,27 @@ dat %>%
   mutate(split = ifelse(
     datetime > split_date,
     sprintf("After %s", format(split_date, "%b-%Y")),
-    sprintf("Before %s", format(split_date, "%b-%Y"))
-  )) %>%
+    sprintf("Before %s", format(split_date, "%b-%Y"))),
+    split = factor(split, 
+                   ordered = TRUE,
+                    levels = c(sprintf("Before %s", format(split_date, "%b-%Y")),
+                               sprintf("After %s", format(split_date, "%b-%Y"))
+                               ))) %>%
   select(split, contains("zone")) %>%
-  tidyr::pivot_longer(-split) %>%
+  pivot_longer(-split) %>%
   ggplot(aes(x = split, y = value, color = split)) +
   geom_boxplot() +
-  geom_jitter(width = 0.2, alpha = 0.3) +
+  geom_jitter(width = 0.2, alpha = 0.2) +
   scale_y_continuous(labels = scales::label_number_si()) +
-  facet_wrap(~name, nrow = 1) +
+  facet_wrap(~name, nrow = 1, switch = TRUE) +
+  theme(legend.position = "none") +
   labs(
     x = NULL,
     y = "Power",
     color = NULL
-  ) +
-  theme(legend.position = "top")
+  ) -> p2
+
+p1 / p2
 ```
 
 ## Seasonalities {.tabset}
@@ -256,7 +269,7 @@ dat %>%
 ```{r}
 dat %>% 
   select(wday.lbl, contains("zone")) %>% 
-  tidyr::pivot_longer(-wday.lbl) %>% 
+  pivot_longer(-wday.lbl) %>% 
   ggplot(aes(wday.lbl, value)) +
   geom_boxplot(aes(color = name))
 ```
@@ -264,7 +277,7 @@ dat %>%
 ```{r}
 dat %>% 
   select(hour, contains("zone")) %>% 
-  tidyr::pivot_longer(-hour) %>% 
+  pivot_longer(-hour) %>% 
   ggplot(aes(hour, value)) +
   geom_boxplot(aes(color = name))
 ```
@@ -272,7 +285,7 @@ dat %>%
 ```{r}
 dat %>% 
   select(month.lbl, contains("zone")) %>% 
-  tidyr::pivot_longer(-month.lbl) %>% 
+  pivot_longer(-month.lbl) %>% 
   ggplot(aes(month.lbl, value)) +
   geom_boxplot(aes(color = name))
 ```
@@ -280,12 +293,12 @@ dat %>%
 ```{r}
 dat %>% 
   select(datetime, contains("zone")) %>% 
-  tidyr::pivot_longer(-datetime) %>% 
+  pivot_longer(-datetime) %>% 
   group_by(name) %>% 
   timetk::plot_time_series_boxplot(datetime, value, "1 month")
 dat %>% 
   select(datetime, month.lbl, contains("zone")) %>% 
-  tidyr::pivot_longer(-datetime:-month.lbl) %>% 
+  pivot_longer(-datetime:-month.lbl) %>% 
   group_by(name) %>% 
   timetk::plot_time_series_boxplot(datetime, value, "1 week")
 ```
