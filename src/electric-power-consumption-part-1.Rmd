@@ -1,7 +1,7 @@
-e---
+---
 title: "Tétouan Electric Consumption - EDA & Predictive Modeling in R - Part 1"
 author: "R Sangole"
-date: "Aug 4, 2022"
+date: "Aug 9, 2022"
 output: 
   html_document: 
     toc: yes
@@ -17,6 +17,18 @@ output:
 knitr::opts_chunk$set(echo=TRUE, error=FALSE)
 knitr::opts_chunk$set(out.width="100%", fig.height = 6, split=FALSE, fig.align = 'default')
 options(dplyr.summarise.inform = FALSE)
+if(!require(see)){
+  install.packages("see")
+}
+if(!require(parameters)){
+  install.packages("parameters")
+}
+if(!require(performance)){
+  install.packages("performance")
+}
+if(!require(report)){
+  install.packages("report")
+}
 ```
 
 ![](https://storage.googleapis.com/kaggle-datasets-images/2380926/4017301/f43904962439a588d97e0069768f54a2/dataset-cover.jpg?t=2022-08-01-21-28-32){width="654"}
@@ -38,7 +50,7 @@ Tétouan is a city in northern Morocco with a population of \~0.5 million. Look 
 
 |                                                                                                                                      |                                                                                                                 |
 |:--------------------------:|:-----------------------------:|
-| ![](https://upload.wikimedia.org/wikipedia/commons/a/a0/A_view_of_Bouanane%252C_a_popular_destination_in_Tetouan._.jpg){width="355"} | ![](https://upload.wikimedia.org/wikipedia/commons/f/f7/A_view_of_mount_ghorghiz_in_Tetouan._.jpg){width="394"} |
+| ![](https://whc.unesco.org/uploads/thumbs/site_0837_0001-750-750-20091006103317.jpg){width="355"} | ![](https://upload.wikimedia.org/wikipedia/commons/f/f7/A_view_of_mount_ghorghiz_in_Tetouan._.jpg){width="394"} |
 
 # Initial Setup {.tabset}
 
@@ -72,13 +84,10 @@ library(patchwork)
 # Time Series
 library(timetk)
 
-# PCA
-if(!require(FactoMineR))
-  remotes::install_cran("FactoMineR")
-if(!require(factoextra))
-  remotes::install_cran("factoextra")
-library(FactoMineR)
-library(factoextra)
+# Modeling
+library(see)
+library(parameters)
+library(performance)
 
 # Tables
 library(reactable)
@@ -109,6 +118,7 @@ glimpse(dat, 100)
 - `datetime` is imported as character, and needs to be handled
 - no missing data at all (thank you, fedesoriano)
 - zone 1, 2 and 3 are in the order of their mean and p90 power consumption ranges
+- wind speed is oddly bimodal. It's only no-wind or windy in Tetouan? Seems fishy.
 - finally, I'll be honest - I have no idea what `general diffuse flows` or `diffuse flows` mean, despite the definition in the data page
 
 ```{r paged.print=FALSE}
@@ -159,12 +169,14 @@ There are two components to the EDA below.
 
 ## TS Plot {.tabset}
 
-A simple time series plot reveals a lot of insight into a time series dataset. Here, I'm plotting the individual series for the year. What do we see here?
+Given we have time series data, I'll start with a simple plot of each of the series to visually inspect the data. Graphically inspecting the series will often reveal so much information lost to aggregated statistics. Look at the plot below. Right away we can take away quite a bit of new learning:
 
-1. Lots of rich dynamics (at least visually) in the power series which we can try to extract later
-1. I see a strong change in the behavior of the series at roughly 27th July 2017. I've marked this with the black dotted line. At the bottom, I'm plotting a 
+1. Lots of rich dynamics (at least visually) in the power series which we can try to extract later.
+1. Temperature and humidity don't seem to have (at least visually) any strong correlation to the power values.
+1. Wind speed is interesting - while there are no missing values, I believe we have a case of a malfunctioning wind speed sensor. Notice the bi modal behavior of wind speed. It's either ~0, or spikes up directly to ~5, with no intermediate values. I'm going to drop this feature downstream.
+1. General diffuse flows and diffuse flows are roughly 100% in agreement with each other. I wonder what contribution they have in explaining the power readings?
 
-```{r}
+```{r fig.height=12, message=FALSE, warning=FALSE}
 dat %>% 
   select(datetime, contains("zone")) %>% 
   pivot_longer(-datetime) %>% 
@@ -175,7 +187,6 @@ dat %>%
   labs(
     x = NULL,
     y = "Power",
-    title = "Year of 2017",
     color = "Zone"
   ) -> p1
 
@@ -213,10 +224,18 @@ dat %>%
     y = "Flows",
     color = "Flows"
   ) -> p5
-p1 / p2 / p3 / p4 / p5
+p1 / p2 / p3 / p4 / p5 +
+  patchwork::plot_annotation(
+    title = "Tétouan Electric Power Readings - Year of 2017"
+  )
 ```
 
+Some further notes:
 
+- I see a strong change in the behavior of the series at roughly 27th July 2017. I've marked this with the black dotted line in the plot above.
+- Visually, I can see the power values suddenly drop a bit, with no visual cues from either of the other graphs, like temperature or humidity.
+- If we zoom into this region (+/- 10 days) in the plots below, we can clearly see the drop for zone 1. 
+- The box plots confirm this with a drop in the median value between the two regions. I can leverage this later for some modeling.
 
 ```{r}
 dat %>% 
@@ -230,7 +249,6 @@ dat %>%
   labs(
     x = NULL,
     y = "Power",
-    title = "Power Zoomed: 15 Dec to 31 Dec 2017",
     color = "Zone"
   )-> p1
 
@@ -253,7 +271,7 @@ dat %>%
   geom_boxplot() +
   geom_jitter(width = 0.2, alpha = 0.2) +
   scale_y_continuous(labels = scales::label_number_si()) +
-  facet_wrap(~name, nrow = 1, switch = TRUE) +
+  facet_wrap(~name, nrow = 1, strip.position = 'bottom') +
   theme(legend.position = "none") +
   labs(
     x = NULL,
@@ -261,41 +279,60 @@ dat %>%
     color = NULL
   ) -> p2
 
-p1 / p2
+p1 / p2 +
+  plot_annotation(
+     title = "Power, zoomed in to 15 Dec-31 Dec 2017"
+  )
 ```
 
 ## Seasonalities {.tabset}
 
-```{r}
+Aggregating the 10-minutely time-series to it's larger temporal groupings is another way to gather some insights. Here, I'm plotting box-plots for hourly, daily, and monthly aggregations. What do we see?
+
+- At the Hourly level, consumption is the lowest at the wee hours of the morning, steadily increasing through the day, with significant upshoots post 6PM. Zone 1 is clearly dominant, with not only the largest absolute values, but the largest changes from min to max values as well.
+- It's hard to see any significant difference at the daily level
+- At the Monthly level, July-August is certainly the worst, probably due to it being summer and the air conditioning loads on the system.
+
+```{r fig.height=8, message=FALSE, warning=FALSE}
 dat %>% 
   select(wday.lbl, contains("zone")) %>% 
   pivot_longer(-wday.lbl) %>% 
   ggplot(aes(wday.lbl, value)) +
-  geom_boxplot(aes(color = name))
-```
+  geom_boxplot(aes(color = name),
+               outlier.alpha = 0.1) +
+  scale_y_continuous(labels = scales::label_number_si()) +
+  labs(x = "Day",
+       y = "Power", 
+       color = "Zone") -> p_wday
 
-```{r}
 dat %>% 
   select(hour, contains("zone")) %>% 
   pivot_longer(-hour) %>% 
   ggplot(aes(hour, value)) +
-  geom_boxplot(aes(color = name))
-```
+  geom_boxplot(aes(color = name),
+               outlier.alpha = 0.1) +
+  scale_y_continuous(labels = scales::label_number_si()) +
+  theme(legend.position = "none") +
+  labs(x = "Hour",
+       y = "Power")  -> p_hour
 
-```{r}
 dat %>% 
   select(month.lbl, contains("zone")) %>% 
   pivot_longer(-month.lbl) %>% 
   ggplot(aes(month.lbl, value)) +
-  geom_boxplot(aes(color = name))
+  geom_boxplot(aes(color = name),
+               outlier.alpha = 0.1) +
+  scale_y_continuous(labels = scales::label_number_si()) +
+  theme(legend.position = "none") +
+  labs(x = "Month",
+       y = "Power")  -> p_month
+
+p_hour / p_wday / p_month
 ```
 
+Yet another fun way to visualize the series is using Matt Dancho's amazing [`{timetk}`](https://business-science.github.io/timetk/index.html) package and it's handy `plot_time_series_boxplot()` function. Here's a plot for weekly aggregations for the same data.
+
 ```{r}
-dat %>% 
-  select(datetime, contains("zone")) %>% 
-  pivot_longer(-datetime) %>% 
-  group_by(name) %>% 
-  timetk::plot_time_series_boxplot(datetime, value, "1 month")
 dat %>% 
   select(datetime, month.lbl, contains("zone")) %>% 
   pivot_longer(-datetime:-month.lbl) %>% 
@@ -305,34 +342,108 @@ dat %>%
 
 # Time Series Linear Modeling (TSLM)
 
+Here, I'm investigating if it's possible to fit a simple time series linear model (TSLM) to the data, specifically three linear models, one for each zone. 
 
+## Quick Modeling
 
-```{r}
-dat %>% 
-  timetk::plot_time_series_regression(
-    datetime,
-    zone1 ~ month.lbl + temperature + humidity + wind_speed + as.factor(day) + hour + week + lag(zone1) + as.factor(datetime>split_date),
-    .show_summary = TRUE
-  )
-dat %>% 
-  timetk::plot_time_series_regression(
-    datetime,
-    zone2 ~ month.lbl + temperature + humidity + wind_speed + as.factor(day) + hour + week + lag(zone2) + as.factor(datetime>split_date),
-    .show_summary = TRUE
-  )
+I won't delve into all the various models I tried out, but suffice to say, TSLM works just beautifully on this dataset - like an academic example. I found that humidity and some of the other variables didn't add a lot of value. The variables I narrowed down to are `r glue::glue_collapse(x = c('month.lbl','temperature','day','hour','week', 'lag-1_values'), last = " and ", sep = ", ")`.
 
+Again, I use a fantastic function from the `{timetk}` package called `plot_time_series_regression()` which can very quickly create grouped TSLM models for quick prototyping. 
+
+Just look at how well a TSLM model works here. When plotted for the whole year, we can't even distinguish the original signal (`value` in black), from the prediction (`fitted` in red)!
+
+```{r fig.height=6, message=FALSE, warning=FALSE}
 dat %>% 
-  timetk::plot_time_series_regression(
-    datetime,
-    zone3 ~ month.lbl + temperature + humidity + wind_speed + as.factor(day) + hour + week + lag(zone3) + as.factor(datetime>split_date),
-    .show_summary = TRUE
-  )
+  select(datetime,
+         month.lbl,
+         temperature,
+         day,
+         hour,
+         week,
+         contains("zone")) %>% 
+  pivot_longer(-datetime:-week, names_to = "zone") %>% 
+  group_by(zone) %>%
+  plot_time_series_regression(
+    .date_var = datetime,
+    value ~ month.lbl+  temperature + as.factor(day) + hour + week + lag(value) ,
+    .show_summary = FALSE,
+    .interactive = FALSE
+  ) -> p
+p +
+  labs(title = "Power vs Prediction, Year of 2017")
+```
+If I zoom in a bit, you can notice where the signals disagree, but even then, ever so minutely. What a wonderful fit.
+
+```{r message=FALSE, warning=FALSE}
+p +
+  scale_x_datetime(limits = c(as.POSIXct("2017-01-01 00:00:00"),
+                              as.POSIXct("2017-01-07 00:00:00"))) +
+  labs(title = "Power vs Prediction, 1st week of Jan 2017")
 ```
 
-```{r}
-dat %>% 
-  timetk::plot_seasonal_diagnostics(datetime, zone1)
+## Insights
+
+Let's poke a bit more into the TSLM model.
+
+```{r full_model, message=FALSE, warning=FALSE}
+dat <- dat %>% 
+  mutate(
+    month.lbl = as.character(month.lbl),
+    day = as.factor(day),
+    hour = as.character(hour)
+  )
+mod_base <- lm(
+  formula = zone1 ~ month.lbl + temperature + day + hour + week + lag(zone1),
+  data = dat
+)
+report::report_model(mod_base)
 ```
+
+Here's the overall model performance. As expected, very high values for adjusted-Rsq, and a low value of RMSE (<1.5% of mean Zone1).
+
+```{r full_model_params}
+model_performance(mod_base)
+```
+
+Let's dig deeper into the coefficients for the linear model. We can look at this in two ways. 
+
+On the left, are the actual coefficients for each parameter. The y axis is sorted alphabetically. The points show the point estimats for the beta coefficients with the horizontal lines showing the error bars. Negative coefficients are in red. While we can see varying ranges for the beta coeffs, we cannot compare these against each other, since the data are not scaled. That's why I won't sort the Y axis on the estimates.
+
+If we do scale the data and calculate the coefficients (done here using the `standardize = 'refit'` option in `parameters()`), then all the features are on the same scale, and the coefficients can be sorted to show the relative impact of each feature on the final predicted value. The plot on the right are these 'standardized coefficients'. Now, it's obvious to see that `lag(zone1)` has the highest impact on the predicted value of zone1 (makes sense intuitvely), followed by coeffs for the hours, months, and so on. `week` number has a negative and lower impact, while `temperature` has almost no impact on the predictions. _Scaling data and plotting the beta coefficients gives us our variable importance plot._
+
+```{r coeff_plot, fig.height=10}
+parameters::parameters(mod_base) %>% 
+  mutate(Parameter = ifelse(Parameter == "zone 1", "lag_zone_1", Parameter)) %>%
+  arrange(Parameter) %>% 
+  plot() +
+  labs(title = "Coefficients")-> p1
+
+parameters::parameters(mod_base, standardize = 'refit') %>%
+  arrange(Coefficient) %>%
+  mutate(Parameter = ifelse(Parameter == "zone 1", "lag_zone_1", Parameter)) %>%
+  plot() +
+  labs(title = "Standardized Coefficients") -> p2
+
+p1 | p2
+```
+
+I can just as quickly test that `lag(zone1)` has a big impact on the model performance. Here, I'll create a model without the lagged values, and we can see the model performance drop significantly. RMSE is now ~8.5% of mean Zone1 values, and Adj-R2 is down to 85%.
+
+```{r reduced_model, fig.height=10, message=FALSE, warning=FALSE}
+mod_nolag <- lm(
+  formula = zone1 ~ month.lbl + temperature + day + hour + week,
+  data = dat[-1, ]
+)
+report::report_model(mod_nolag)
+model_performance(mod_nolag)
+parameters::parameters(mod_nolag, standardize = 'refit') %>%
+  arrange(Coefficient) %>%
+  mutate(Parameter = ifelse(Parameter == "zone 1", "lag_zone_1", Parameter)) %>%
+  plot() +
+  labs(title = "Standardized Coefficients - Model with No Lag") 
+```
+
+I haven't plotted out the TSLMs for the other zones, but they behave just as well and are powerful predictive models.
 
 ---
 
